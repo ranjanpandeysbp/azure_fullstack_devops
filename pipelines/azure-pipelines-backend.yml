@@ -1,0 +1,320 @@
+# =============================================================
+# azure-pipelines-backend.yml
+# CI/CD Pipeline for Spring Boot Backend → Azure App Service
+# Triggers on changes to the backend/ directory
+# =============================================================
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - release/*
+  paths:
+    include:
+      - backend/**
+      - azure-pipelines-backend.yml
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - backend/**
+
+# ── Variables ─────────────────────────────────────────────────
+variables:
+  - group: azure-global-vars  # RESOURCE_GROUP, etc.
+
+  - name: JAVA_VERSION
+    value: '17'
+  - name: WORKING_DIR
+    value: 'backend'
+  - name: JAR_NAME
+    value: 'employee-management-api.jar'
+  - name: SERVICE_CONNECTION
+    value: 'sc-azure-emp'
+  - name: APP_NAME_DEV
+    value: 'emp-api-dev'
+  - name: APP_NAME_PROD
+    value: 'emp-api-prod'
+  - name: RG_DEV
+    value: 'rg-emp-dev'
+  - name: RG_PROD
+    value: 'rg-emp-prod'
+
+stages:
+
+# ─────────────────────────────────────────────────────────────
+# STAGE 1: Build, Test & Package
+# ─────────────────────────────────────────────────────────────
+- stage: Build
+  displayName: '🔨 Build Spring Boot'
+  jobs:
+  - job: BuildJob
+    displayName: 'Maven Build, Test & Package'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+
+    - task: JavaToolInstaller@0
+      displayName: '☕ Use Java $(JAVA_VERSION)'
+      inputs:
+        versionSpec: '$(JAVA_VERSION)'
+        jdkArchitectureOption: 'x64'
+        jdkSourceOption: 'PreInstalled'
+
+    - script: |
+        echo "Java version:"
+        java -version
+        echo "Maven version:"
+        mvn -version
+      displayName: '🔍 Print tool versions'
+
+    # Run tests with local (H2) profile
+    - task: Maven@4
+      displayName: '🧪 Run Tests (H2 local profile)'
+      inputs:
+        mavenPomFile: '$(WORKING_DIR)/pom.xml'
+        goals: 'test'
+        options: '-Dspring.profiles.active=local -pl .'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '$(JAVA_VERSION)'
+
+    - task: PublishCodeCoverageResults@1
+      displayName: '📈 Publish code coverage'
+      condition: always()
+      inputs:
+        codeCoverageTool: 'JaCoCo'
+        summaryFileLocation: '$(WORKING_DIR)/target/site/jacoco/jacoco.xml'
+        reportDirectory: '$(WORKING_DIR)/target/site/jacoco'
+
+    # Package (skip tests — already ran above)
+    - task: Maven@4
+      displayName: '🏗️ Package JAR (skip tests)'
+      inputs:
+        mavenPomFile: '$(WORKING_DIR)/pom.xml'
+        goals: 'package'
+        options: '-DskipTests -Dspring.profiles.active=local'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '$(JAVA_VERSION)'
+
+    - script: |
+        ls -lh $(WORKING_DIR)/target/
+        JAR=$(WORKING_DIR)/target/$(JAR_NAME)
+        echo "JAR size: $(du -sh $JAR | cut -f1)"
+      displayName: '📋 Show JAR info'
+
+    - task: CopyFiles@2
+      displayName: '📋 Copy JAR to staging'
+      inputs:
+        SourceFolder: '$(WORKING_DIR)/target'
+        Contents: '$(JAR_NAME)'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+    - task: PublishPipelineArtifact@1
+      displayName: '📤 Publish JAR artifact'
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)'
+        artifact: 'backend-jar'
+
+# ─────────────────────────────────────────────────────────────
+# STAGE 2: Deploy to Dev
+# ─────────────────────────────────────────────────────────────
+- stage: DeployDev
+  displayName: '🚀 Deploy to Dev'
+  dependsOn: Build
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  variables:
+    APP_NAME: $(APP_NAME_DEV)
+    RG: $(RG_DEV)
+  jobs:
+  - deployment: DeployBackendDev
+    displayName: 'Deploy Spring Boot to Dev App Service'
+    environment: 'backend-dev'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'backend-jar'
+              path: '$(Pipeline.Workspace)/backend-jar'
+
+          - task: AzureWebApp@1
+            displayName: '☁️ Deploy JAR to App Service'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              appType: 'webAppLinux'
+              appName: '$(APP_NAME)'
+              resourceGroupName: '$(RG)'
+              package: '$(Pipeline.Workspace)/backend-jar/$(JAR_NAME)'
+              runtimeStack: 'JAVA|17-java17'
+              startUpCommand: 'java -jar /home/site/wwwroot/$(JAR_NAME) --spring.profiles.active=azure'
+              deploymentMethod: 'zipDeploy'
+
+          - task: AzureCLI@2
+            displayName: '✅ Health check DEV API'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                URL="https://$(APP_NAME).azurewebsites.net/api/health"
+                echo "Waiting 60s for app to start..."
+                sleep 60
+                for i in {1..5}; do
+                  STATUS=$(curl -s -o /dev/null -w "%{http_code}" $URL)
+                  echo "Attempt $i — HTTP Status: $STATUS"
+                  if [ "$STATUS" -eq 200 ]; then
+                    echo "✅ Backend API is healthy!"
+                    curl -s $URL | python3 -m json.tool
+                    exit 0
+                  fi
+                  sleep 15
+                done
+                echo "❌ Health check failed after 5 attempts"
+                exit 1
+
+          # Run basic API tests against DEV
+          - task: AzureCLI@2
+            displayName: '🧪 API Integration Tests (DEV)'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                BASE="https://$(APP_NAME).azurewebsites.net/api"
+
+                echo "Test 1: GET /employees"
+                STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/employees")
+                [ "$STATUS" -eq 200 ] && echo "  ✅ GET /employees → 200" || echo "  ❌ Expected 200, got $STATUS"
+
+                echo "Test 2: GET /employees/departments"
+                STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/employees/departments")
+                [ "$STATUS" -eq 200 ] && echo "  ✅ GET /departments → 200" || echo "  ❌ Expected 200, got $STATUS"
+
+                echo "Test 3: GET /employees/999 (should be 404)"
+                STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/employees/999")
+                [ "$STATUS" -eq 404 ] && echo "  ✅ GET /employees/999 → 404" || echo "  ❌ Expected 404, got $STATUS"
+
+                echo "✅ All API tests passed!"
+
+# ─────────────────────────────────────────────────────────────
+# STAGE 3: Deploy to Production (requires approval)
+# ─────────────────────────────────────────────────────────────
+- stage: DeployProd
+  displayName: '🚀 Deploy to Production'
+  dependsOn: DeployDev
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  variables:
+    APP_NAME: $(APP_NAME_PROD)
+    RG: $(RG_PROD)
+  jobs:
+  - deployment: DeployBackendProd
+    displayName: 'Deploy Spring Boot to Production'
+    environment: 'backend-prod'   # ← Manual approval gate
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        preDeploy:
+          steps:
+          - script: |
+              echo "🔍 Pre-deployment checks for PRODUCTION..."
+              echo "Build: $(Build.BuildNumber)"
+              echo "Branch: $(Build.SourceBranch)"
+              echo "Triggered by: $(Build.RequestedFor)"
+            displayName: 'Pre-deploy info'
+        deploy:
+          steps:
+
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'backend-jar'
+              path: '$(Pipeline.Workspace)/backend-jar'
+
+          # Blue-Green deployment using deployment slots
+          - task: AzureCLI@2
+            displayName: '🔵 Deploy to Staging Slot (Blue-Green)'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Ensure staging slot exists
+                az webapp deployment slot create \
+                  --resource-group $(RG) \
+                  --name $(APP_NAME) \
+                  --slot staging \
+                  --configuration-source $(APP_NAME) \
+                  2>/dev/null || echo "Slot already exists"
+
+                # Deploy to staging slot
+                az webapp deploy \
+                  --resource-group $(RG) \
+                  --name $(APP_NAME) \
+                  --slot staging \
+                  --src-path $(Pipeline.Workspace)/backend-jar/$(JAR_NAME) \
+                  --type jar
+
+                echo "✅ Deployed to staging slot"
+
+          - task: AzureCLI@2
+            displayName: '✅ Test Staging Slot'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                STAGING_URL="https://$(APP_NAME)-staging.azurewebsites.net/api/health"
+                sleep 60
+                STATUS=$(curl -s -o /dev/null -w "%{http_code}" $STAGING_URL)
+                echo "Staging health check: $STATUS"
+                [ "$STATUS" -eq 200 ] && echo "✅ Staging healthy!" || (echo "❌ Staging unhealthy" && exit 1)
+
+          - task: AzureCLI@2
+            displayName: '🔄 Swap Staging → Production'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az webapp deployment slot swap \
+                  --resource-group $(RG) \
+                  --name $(APP_NAME) \
+                  --slot staging \
+                  --target-slot production
+                echo "✅ Production swap complete!"
+                echo "🌍 Live at: https://$(APP_NAME).azurewebsites.net"
+
+          - task: AzureCLI@2
+            displayName: '✅ Production Health Check'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                URL="https://$(APP_NAME).azurewebsites.net/api/health"
+                sleep 30
+                STATUS=$(curl -s -o /dev/null -w "%{http_code}" $URL)
+                if [ "$STATUS" -eq 200 ]; then
+                  echo "✅ PRODUCTION is healthy!"
+                  curl -s $URL | python3 -m json.tool
+                else
+                  echo "❌ PRODUCTION health check failed: $STATUS"
+                  echo "⏪ Rolling back — swapping back to previous version"
+                  az webapp deployment slot swap \
+                    --resource-group $(RG) \
+                    --name $(APP_NAME) \
+                    --slot staging \
+                    --target-slot production
+                  exit 1
+                fi

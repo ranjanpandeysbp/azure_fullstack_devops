@@ -1,0 +1,11 @@
+-- Seed data for local H2 development
+INSERT INTO employees (first_name, last_name, email, department, position, salary, created_at, updated_at)
+VALUES
+  ('Alice',   'Johnson',  'alice.johnson@company.com',  'Engineering',  'Senior Developer',    95000.00, NOW(), NOW()),
+  ('Bob',     'Smith',    'bob.smith@company.com',      'Engineering',  'Junior Developer',    65000.00, NOW(), NOW()),
+  ('Carol',   'Williams', 'carol.w@company.com',        'Product',      'Product Manager',     88000.00, NOW(), NOW()),
+  ('David',   'Brown',    'david.b@company.com',        'Marketing',    'Marketing Lead',      78000.00, NOW(), NOW()),
+  ('Eve',     'Davis',    'eve.davis@company.com',      'HR',           'HR Manager',          72000.00, NOW(), NOW()),
+  ('Frank',   'Miller',   'frank.m@company.com',        'Engineering',  'DevOps Engineer',     90000.00, NOW(), NOW()),
+  ('Grace',   'Wilson',   'grace.w@company.com',        'Design',       'UX Designer',         80000.00, NOW(), NOW()),
+  ('Henry',   'Taylor',   'henry.t@company.com',        'Finance',      'Financial Analyst',   85000.00, NOW(), NOW());

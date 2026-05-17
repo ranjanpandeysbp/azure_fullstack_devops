@@ -1,0 +1,276 @@
+# =============================================================
+# azure-pipelines-frontend.yml
+# CI/CD Pipeline for React Frontend → Azure App Service
+# Triggers on changes to the frontend/ directory
+# =============================================================
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - release/*
+  paths:
+    include:
+      - frontend/**
+      - azure-pipelines-frontend.yml
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - frontend/**
+
+# ── Pipeline Variables ────────────────────────────────────────
+variables:
+  # Group containing: AZURE_SUBSCRIPTION_ID, RESOURCE_GROUP
+  - group: azure-global-vars
+
+  # App-specific vars
+  - name: NODE_VERSION
+    value: '18.x'
+  - name: WORKING_DIR
+    value: 'frontend'
+  - name: BUILD_DIR
+    value: 'frontend/build'
+
+  # Environment-specific (set per stage)
+  - name: APP_NAME_DEV
+    value: 'emp-frontend-dev'
+  - name: APP_NAME_PROD
+    value: 'emp-frontend-prod'
+  - name: SERVICE_CONNECTION
+    value: 'sc-azure-emp'
+
+# ── Stages ────────────────────────────────────────────────────
+stages:
+
+# ─────────────────────────────────────────────────────────────
+# STAGE 1: Build & Test
+# ─────────────────────────────────────────────────────────────
+- stage: Build
+  displayName: '🔨 Build React App'
+  jobs:
+  - job: BuildJob
+    displayName: 'Install, Test & Build'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+
+    - task: NodeTool@0
+      displayName: '📦 Use Node.js $(NODE_VERSION)'
+      inputs:
+        versionSpec: '$(NODE_VERSION)'
+
+    - script: |
+        echo "Node version: $(node -v)"
+        echo "npm version: $(npm -v)"
+      displayName: '🔍 Print versions'
+
+    - script: npm ci
+      displayName: '📦 Install dependencies (clean install)'
+      workingDirectory: $(WORKING_DIR)
+
+    - script: |
+        npm run test -- --coverage --watchAll=false --passWithNoTests
+      displayName: '🧪 Run unit tests'
+      workingDirectory: $(WORKING_DIR)
+      env:
+        CI: true
+
+    - task: PublishTestResults@2
+      displayName: '📊 Publish test results'
+      condition: always()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '$(WORKING_DIR)/coverage/junit.xml'
+        failTaskOnFailedTests: false
+
+    - task: PublishCodeCoverageResults@1
+      displayName: '📈 Publish coverage'
+      condition: always()
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(WORKING_DIR)/coverage/cobertura-coverage.xml'
+
+    # Build with DEV config first to validate
+    - script: |
+        REACT_APP_API_URL=/api \
+        npm run build
+      displayName: '🏗️ Build React (dev config)'
+      workingDirectory: $(WORKING_DIR)
+
+    - task: PublishPipelineArtifact@1
+      displayName: '📤 Publish build artifact'
+      inputs:
+        targetPath: '$(WORKING_DIR)/build'
+        artifact: 'frontend-build'
+
+# ─────────────────────────────────────────────────────────────
+# STAGE 2: Deploy to Dev
+# ─────────────────────────────────────────────────────────────
+- stage: DeployDev
+  displayName: '🚀 Deploy to Dev'
+  dependsOn: Build
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+  variables:
+    APP_NAME: $(APP_NAME_DEV)
+    BACKEND_API_URL: 'https://emp-api-dev.azurewebsites.net/api'
+  jobs:
+  - deployment: DeployFrontendDev
+    displayName: 'Deploy to Dev App Service'
+    environment: 'frontend-dev'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'frontend-build'
+              path: '$(Pipeline.Workspace)/frontend-build'
+
+          # Rebuild with correct DEV API URL
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '$(NODE_VERSION)'
+
+          - checkout: self
+
+          - script: npm ci
+            displayName: '📦 Install deps'
+            workingDirectory: $(WORKING_DIR)
+
+          - script: |
+              echo "Building for DEV with API: $(BACKEND_API_URL)"
+              REACT_APP_API_URL=$(BACKEND_API_URL) \
+              REACT_APP_ENV=development \
+              npm run build
+            displayName: '🏗️ Build with DEV API URL'
+            workingDirectory: $(WORKING_DIR)
+
+          - task: AzureCLI@2
+            displayName: '☁️ Deploy to Azure App Service'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Zip the build folder
+                cd $(WORKING_DIR)/build
+                zip -r $(Pipeline.Workspace)/frontend.zip . -x "*.map"
+
+                # Deploy via zip deploy
+                az webapp deployment source config-zip \
+                  --resource-group $(RESOURCE_GROUP) \
+                  --name $(APP_NAME) \
+                  --src $(Pipeline.Workspace)/frontend.zip
+
+                # Configure SPA routing (serve index.html for all routes)
+                az webapp config set \
+                  --resource-group $(RESOURCE_GROUP) \
+                  --name $(APP_NAME) \
+                  --startup-file "pm2 serve /home/site/wwwroot --no-daemon --spa"
+
+                echo "✅ Deployed to: https://$(APP_NAME).azurewebsites.net"
+
+          - task: AzureCLI@2
+            displayName: '✅ Smoke test deployment'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                URL="https://$(APP_NAME).azurewebsites.net"
+                echo "Testing: $URL"
+                sleep 20  # Wait for app to start
+                STATUS=$(curl -s -o /dev/null -w "%{http_code}" $URL)
+                echo "HTTP Status: $STATUS"
+                if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+                  echo "✅ Frontend is UP!"
+                else
+                  echo "❌ Frontend returned $STATUS"
+                  exit 1
+                fi
+
+# ─────────────────────────────────────────────────────────────
+# STAGE 3: Deploy to Production (requires approval)
+# ─────────────────────────────────────────────────────────────
+- stage: DeployProd
+  displayName: '🚀 Deploy to Production'
+  dependsOn: DeployDev
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  variables:
+    APP_NAME: $(APP_NAME_PROD)
+    BACKEND_API_URL: 'https://emp-api-prod.azurewebsites.net/api'
+    RG_PROD: 'rg-emp-prod'
+  jobs:
+  - deployment: DeployFrontendProd
+    displayName: 'Deploy to Production App Service'
+    environment: 'frontend-prod'   # ← Manual approval gate configured here
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - checkout: self
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '$(NODE_VERSION)'
+
+          - script: npm ci
+            displayName: '📦 Install deps'
+            workingDirectory: $(WORKING_DIR)
+
+          - script: |
+              echo "Building for PRODUCTION with API: $(BACKEND_API_URL)"
+              REACT_APP_API_URL=$(BACKEND_API_URL) \
+              REACT_APP_ENV=production \
+              GENERATE_SOURCEMAP=false \
+              npm run build
+            displayName: '🏗️ Build for Production (no sourcemaps)'
+            workingDirectory: $(WORKING_DIR)
+
+          - task: AzureCLI@2
+            displayName: '☁️ Deploy to PROD App Service'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                cd $(WORKING_DIR)/build
+                zip -r $(Pipeline.Workspace)/frontend-prod.zip . -x "*.map"
+
+                az webapp deployment source config-zip \
+                  --resource-group $(RG_PROD) \
+                  --name $(APP_NAME) \
+                  --src $(Pipeline.Workspace)/frontend-prod.zip
+
+                az webapp config set \
+                  --resource-group $(RG_PROD) \
+                  --name $(APP_NAME) \
+                  --startup-file "pm2 serve /home/site/wwwroot --no-daemon --spa"
+
+                echo "✅ PROD Deployed: https://$(APP_NAME).azurewebsites.net"
+
+          - task: AzureCLI@2
+            displayName: '✅ Production smoke test'
+            inputs:
+              azureSubscription: '$(SERVICE_CONNECTION)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                URL="https://$(APP_NAME).azurewebsites.net"
+                sleep 30
+                STATUS=$(curl -s -o /dev/null -w "%{http_code}" $URL)
+                [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ] \
+                  && echo "✅ PROD is healthy: $STATUS" \
+                  || (echo "❌ PROD returned: $STATUS" && exit 1)
