@@ -10,12 +10,21 @@ A complete CRUD application with:
 
 ---
 
+## Install Following
+
+1. JDK 17 or above : https://adoptium.net/temurin/releases?version=17&os=any&arch=any
+2. NodeJS 18 and above Windows Installer: https://nodejs.org/en/download
+3. VSCode latest
+4. Intellij Community Version
+5. Git Bash
+
 ## Quick Start (Local Development)
 
 ### Backend (H2 in-memory DB)
 ```bash
 cd backend
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+ You can also Run the AzureDemoApplication.java file as Run as main class
 # API available at: http://localhost:8080
 # H2 Console at:   http://localhost:8080/h2-console
 # Health check:    http://localhost:8080/api/health
