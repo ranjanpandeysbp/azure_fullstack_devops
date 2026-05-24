@@ -1,0 +1,21 @@
+make sure to run below commands from root of the project
+npm install
+npm run build
+
+Step 1 - Create Resource Group
+az group create --name inv-rg-dev01 --location centralindia
+
+Step 2 - Create Appservice plan
+az appservice plan create --name inv-asp-dev01 --resource-group inv-rg-dev01 --sku B2 --is-linux
+
+Step 3- Create the Appservice
+az webapp create --name inv-fe-as-dev01 --resource-group inv-rg-dev01 --plan inv-asp-dev01 --runtime "NODE:22-lts"
+
+Step - 4: Set the appservice config
+az webapp config set --name inv-fe-as-dev01 --resource-group inv-rg-dev01 --startup-file "npx serve -s /home/site/wwwroot -l 8080"
+
+Step -4: Deploy react js
+az webapp deploy --resource-group inv-rg-dev01 --name inv-fe-as-dev01 --src-path build/react-build.zip --type zip
+
+Step -5: Browse the application
+az webapp browse --name inv-fe-as-dev01 --resource-group inv-rg-dev01

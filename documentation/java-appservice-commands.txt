@@ -1,0 +1,21 @@
+
+make sure to run
+mvn clean package from root of backend project
+
+Step 1 - Create Resource Group
+az group create --name inv-rg-dev01 --location centralindia
+
+Step 2 - Create Appservice plan
+az appservice plan create --name inv-asp-dev01 --resource-group inv-rg-dev01 --sku B2 --is-linux
+
+Step 3- Create the Appservice
+az webapp create --name inv-be-as-dev01 --resource-group inv-rg-dev01 --plan inv-asp-dev01 --runtime "JAVA:21-java21"
+
+Step - 4: Set the appservice config
+az webapp config appsettings set --name inv-be-as-dev01 --resource-group inv-rg-dev01 --settings JAVA_OPTS="-Xms512m -Xmx1024m" SPRING_PROFILES_ACTIVE="local" SERVER_PORT=8080 CORS_ALLOWED_ORIGINS="https://inv-fe-as-dev01.azurewebsites.net/"
+
+Step -4: Deploy springboot
+az webapp deploy --resource-group inv-rg-dev01 --name inv-be-as-dev01 --src-path target/employee-management-api-1.0.0.jar --type jar
+
+Command to restart appservice:
+az webapp restart --name inv-be-as-dev01 --resource-group inv-rg-dev01
