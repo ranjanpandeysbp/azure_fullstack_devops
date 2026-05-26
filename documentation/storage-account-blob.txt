@@ -6,7 +6,7 @@ az storage account update --name invsadev02 --resource-group inv-rg-test01 --all
 
 Step 2:
 Create a container with public access:
-az storage container create --account-name invsadev02 --name images --public-access blob --connection-string "DefaultEndpointsProtocol=https;AccountName=invsadev02;AccountKey=boPct4exqV8cBFkWs76GHor+Ax33zN+sI7kqM8mF1NHMGX7uwxV7zJVU4ZGu8HsyKTJ1VqSF23a3+AStw0rzcg==;EndpointSuffix=core.windows.net"
+az storage container create --account-name invsadev02 --name images --public-access blob --connection-string "DefaultEndpointsProtocol=https;AccountName=invsadev02;;EndpointSuffix=core.windows.net"
 
 Step 3:
 Upload a file to the images container
