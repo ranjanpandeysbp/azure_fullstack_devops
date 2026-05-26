@@ -1,0 +1,28 @@
+Step 1:
+Create New Storage Account:
+az storage account create --name invsadev02 --resource-group inv-rg-test01 --location centralindia --sku Standard_LRS --kind StorageV2 --access-tier Hot
+
+az storage account update --name invsadev02 --resource-group inv-rg-test01 --allow-blob-public-access true
+
+Step 2:
+Create a container with public access:
+az storage container create --account-name invsadev02 --name images --public-access blob --connection-string "DefaultEndpointsProtocol=https;AccountName=invsadev02;AccountKey=boPct4exqV8cBFkWs76GHor+Ax33zN+sI7kqM8mF1NHMGX7uwxV7zJVU4ZGu8HsyKTJ1VqSF23a3+AStw0rzcg==;EndpointSuffix=core.windows.net"
+
+Step 3:
+Upload a file to the images container
+
+az storage blob upload --account-name invsadev02 --container-name images --name myphoto.jpg --file ./fullstack_app_pic_five.JPG
+
+Step 4:
+List all blobs inside a container
+
+az storage blob list --account-name invsadev02 --container-name images --output table
+az storage blob list --account-name invsadev01 --container-name $web --output table
+
+Step 5:
+Delete a blob
+az storage blob delete --account-name invsadev02 --container-name images --name myphoto.jpg
+
+Step 6:
+Delete storage account
+az storage account delete --name invsadev02 --resource-group inv-rg-test01 --yes

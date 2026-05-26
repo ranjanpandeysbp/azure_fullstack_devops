@@ -1,0 +1,2 @@
+AZURE CLI Docs:
+https://learn.microsoft.com/en-us/cli/azure/appservice/ase?view=azure-cli-latest
