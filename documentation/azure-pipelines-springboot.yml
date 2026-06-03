@@ -1,0 +1,75 @@
+trigger:                                    # Defines what events automatically start the pipeline
+  branches:                                 # Filter trigger to specific branches only
+    include:                                # Whitelist of branches that will trigger the pipeline
+      - main                                # Run pipeline when code is pushed to 'main' branch
+      - feature/*                           # Run pipeline for any branch starting with 'feature/'
+
+pool:                                       # Defines the agent (machine) that will run the pipeline
+  vmImage: ubuntu-latest                    # Use Microsoft-hosted Ubuntu Linux as the build agent
+
+variables:                                  # Declares reusable values accessible throughout the pipeline
+  buildConfiguration: Release               # Variable: build mode label (used for clarity/consistency)
+  appName: myspringapp-demo-dev             # Variable: the Azure App Service name to deploy to
+  javaVersion: '17'                         # Variable: Java version to install on the build agent
+  mavenGoals: 'clean package'               # Variable: Maven goals — clean old build, then package into JAR
+
+stages:                                     # Top-level pipeline phases; run sequentially by default
+  - stage: Build                            # First stage — unique ID used to reference this stage
+    displayName: 'Build Stage'              # Human-readable label shown in Azure DevOps UI
+    jobs:                                   # List of jobs to run within this stage
+      - job: BuildApp                       # Job ID — a unit of work that runs on one agent
+        displayName: 'Build Spring Boot App' # Human-readable label for this job in the UI
+        steps:                              # Ordered list of tasks/scripts to execute in this job
+
+          - task: JavaToolInstaller@0       # Built-in task: installs a specific version of Java (JDK)
+            inputs:                         # Parameters passed into the task
+              versionSpec: $(javaVersion)   # Java version to install (from variable above — '17')
+              jdkArchitectureOption: 'x64'  # Architecture: 64-bit JDK
+              jdkSourceOption: 'PreInstalled' # Use JDK already available on the Microsoft-hosted agent
+            displayName: 'Install Java $(javaVersion)' # Label shown for this step in the UI
+
+          - task: Maven@3                   # Built-in task: runs Maven build commands
+            inputs:                         # Parameters passed into the task
+              mavenPomFile: 'pom.xml'       # Path to the Maven project descriptor file
+              goals: $(mavenGoals)          # Maven goals to run: 'clean package' (from variable above)
+              options: '-DskipTests=false'  # Do NOT skip tests — run them as part of the build
+              publishJUnitResults: true     # Publish JUnit test results to Azure DevOps test tab
+              testResultsFiles: '**/surefire-reports/TEST-*.xml' # Path pattern for JUnit XML reports
+              javaHomeOption: 'JDKVersion'  # Tell Maven which Java to use — the version installed above
+              jdkVersionOption: $(javaVersion) # Java version for Maven to use (matches install step)
+              mavenVersionOption: 'Default' # Use the Maven version pre-installed on the agent
+            displayName: 'Maven Clean & Package' # Label shown for this step in the UI
+
+          - task: CopyFiles@2               # Built-in task: copies files to the staging directory
+            inputs:                         # Parameters passed into the task
+              sourceFolder: '$(System.DefaultWorkingDirectory)/target' # Maven outputs JAR here
+              contents: '*.jar'             # Only copy JAR files (the deployable Spring Boot artifact)
+              targetFolder: '$(Build.ArtifactStagingDirectory)' # Standard staging area for artifacts
+            displayName: 'Copy JAR to Staging' # Label shown for this step in the UI
+
+          - task: PublishBuildArtifacts@1   # Built-in task: saves build output for later stages
+            inputs:                         # Parameters passed into the task
+              pathToPublish: '$(Build.ArtifactStagingDirectory)' # Folder containing the JAR to publish
+              artifactName: 'drop'          # Name of the artifact bundle (referenced in Deploy stage)
+            displayName: 'Publish Artifacts' # Label shown for this step in the UI
+
+  - stage: Deploy                           # Second stage — handles deployment after a successful build
+    displayName: 'Deploy to Dev'            # Human-readable label for this stage in the UI
+    dependsOn: Build                        # This stage only starts after the 'Build' stage completes
+    condition: succeeded()                  # Only run this stage if all previous stages passed
+    jobs:                                   # List of jobs to run within this stage
+      - deployment: DeploySpringApp         # Special deployment job type (tracks environment history)
+        displayName: 'Deploy to App Service' # Human-readable label for this job in the UI
+        environment: 'development'          # Links to an Azure DevOps Environment for tracking & approvals
+        strategy:                           # Defines how the deployment is executed
+          runOnce:                          # Simple strategy: run the deployment steps exactly once
+            deploy:                         # The deploy lifecycle hook — steps run during deployment
+              steps:                        # Ordered list of tasks to execute in this deployment
+
+                - task: AzureWebApp@1       # Built-in task: deploys a package to Azure App Service
+                  inputs:                   # Parameters passed into the task
+                    azureSubscription: 'sc-azure-myapp'  # Service connection name for Azure auth
+                    appType: webAppLinux                 # Target is a Linux-based App Service
+                    appName: $(appName)                  # App Service name (from variables above)
+                    package: '$(Pipeline.Workspace)/drop/**/*.jar' # Path to the published JAR artifact
+                    startUpCommand: 'java -jar /home/site/wwwroot/*.jar' # Command Azure uses to launch the Spring Boot app

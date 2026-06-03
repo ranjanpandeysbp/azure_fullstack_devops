@@ -1,0 +1,56 @@
+trigger:                              # Defines what events automatically start the pipeline
+  branches:                           # Filter trigger to specific branches only
+    include:                          # Whitelist of branches that will trigger the pipeline
+      - main                          # Run pipeline when code is pushed to 'main' branch
+      - feature/*                     # Run pipeline for any branch starting with 'feature/'
+
+pool:                                 # Defines the agent (machine) that will run the pipeline
+  vmImage: ubuntu-latest              # Use Microsoft-hosted Ubuntu Linux as the build agent
+
+variables:                            # Declares reusable values accessible throughout the pipeline
+  buildConfiguration: Release         # Variable: build mode (Release = optimized, no debug symbols)
+  appName: mywebapp-demo-dev          # Variable: the Azure App Service name to deploy to
+
+stages:                               # Top-level pipeline phases; run sequentially by default
+  - stage: Build                      # First stage — unique ID used to reference this stage
+    displayName: 'Build Stage'        # Human-readable label shown in Azure DevOps UI
+    jobs:                             # List of jobs to run within this stage
+      - job: BuildApp                 # Job ID — a unit of work that runs on one agent
+        displayName: 'Build Application' # Human-readable label for this job in the UI
+        steps:                        # Ordered list of tasks/scripts to execute in this job
+
+          - task: NodeTool@0          # Built-in task: installs a specific version of Node.js
+            inputs:                   # Parameters passed into the task
+              versionSpec: '18.x'     # Install Node.js version 18 (any patch release)
+            displayName: 'Install Node.js' # Label shown for this step in the UI
+
+          - script: |                 # Runs one or more shell commands on the agent
+              npm install             # Installs all project dependencies from package.json
+              npm run build           # Executes the build script defined in package.json
+              npm test                # Runs the test suite to validate the build
+            displayName: 'Install, Build & Test' # Label shown for this step in the UI
+
+          - task: PublishBuildArtifacts@1   # Built-in task: saves build output for later stages
+            inputs:                         # Parameters passed into the task
+              pathToPublish: '$(Build.ArtifactStagingDirectory)' # Folder containing files to publish
+              artifactName: 'drop'          # Name of the artifact bundle (referenced in Deploy stage)
+            displayName: 'Publish Artifacts' # Label shown for this step in the UI
+
+  - stage: Deploy                     # Second stage — handles deployment after a successful build
+    displayName: 'Deploy to Dev'      # Human-readable label for this stage in the UI
+    dependsOn: Build                  # This stage only starts after the 'Build' stage completes
+    condition: succeeded()            # Only run this stage if all previous stages passed
+    jobs:                             # List of jobs to run within this stage
+      - deployment: DeployWebApp      # Special deployment job type (tracks environment history)
+        displayName: 'Deploy to App Service' # Human-readable label for this job in the UI
+        environment: 'development'    # Links to an Azure DevOps Environment for tracking & approvals
+        strategy:                     # Defines how the deployment is executed
+          runOnce:                    # Simple strategy: run the deployment steps exactly once
+            deploy:                   # The deploy lifecycle hook — steps run during deployment
+              steps:                  # Ordered list of tasks to execute in this deployment
+                - task: AzureWebApp@1 # Built-in task: deploys a package to Azure App Service
+                  inputs:             # Parameters passed into the task
+                    azureSubscription: 'sc-azure-myapp' # Service connection name for Azure auth
+                    appType: webAppLinux                # Target is a Linux-based App Service
+                    appName: $(appName)                 # App Service name (from variables above)
+                    package: '$(Pipeline.Workspace)/drop/**/*.zip' # Path to the published zip artifact

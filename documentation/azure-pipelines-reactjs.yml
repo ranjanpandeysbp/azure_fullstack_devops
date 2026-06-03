@@ -1,0 +1,80 @@
+trigger:                                      # Defines what events automatically start the pipeline
+  branches:                                   # Filter trigger to specific branches only
+    include:                                  # Whitelist of branches that will trigger the pipeline
+      - main                                  # Run pipeline when code is pushed to 'main' branch
+      - feature/*                             # Run pipeline for any branch starting with 'feature/'
+
+pool:                                         # Defines the agent (machine) that will run the pipeline
+  vmImage: ubuntu-latest                      # Use Microsoft-hosted Ubuntu Linux as the build agent
+
+variables:                                    # Declares reusable values accessible throughout the pipeline
+  buildConfiguration: Release                 # Variable: build mode label (used for clarity/consistency)
+  appName: myreactapp-demo-dev                # Variable: the Azure App Service name to deploy to
+  nodeVersion: '20.x'                         # Variable: Node.js version to install on the build agent
+  workingDirectory: '$(System.DefaultWorkingDirectory)' # Variable: root folder of the repo on the agent
+
+stages:                                       # Top-level pipeline phases; run sequentially by default
+  - stage: Build                              # First stage — unique ID used to reference this stage
+    displayName: 'Build Stage'                # Human-readable label shown in Azure DevOps UI
+    jobs:                                     # List of jobs to run within this stage
+      - job: BuildApp                         # Job ID — a unit of work that runs on one agent
+        displayName: 'Build React App'        # Human-readable label for this job in the UI
+        steps:                                # Ordered list of tasks/scripts to execute in this job
+
+          - task: NodeTool@0                  # Built-in task: installs a specific version of Node.js
+            inputs:                           # Parameters passed into the task
+              versionSpec: $(nodeVersion)     # Node.js version to install (from variable above — '20.x')
+            displayName: 'Install Node.js $(nodeVersion)' # Label shown for this step in the UI
+
+          - script: npm ci                    # Runs 'npm ci' — clean install using exact package-lock.json versions
+            workingDirectory: $(workingDirectory) # Run this command from the repo root folder
+            displayName: 'Install Dependencies' # Label shown for this step in the UI
+
+          - script: npm test -- --watchAll=false --ci # Runs React tests in CI mode (no watch, exits after run)
+            workingDirectory: $(workingDirectory)     # Run this command from the repo root folder
+            displayName: 'Run Tests'                  # Label shown for this step in the UI
+            env:                                      # Environment variables injected into this step
+              CI: true                                # Tells Create React App to treat warnings as errors
+
+          - script: npm run build              # Runs the React production build — outputs to /build folder
+            workingDirectory: $(workingDirectory) # Run this command from the repo root folder
+            displayName: 'Build React App'     # Label shown for this step in the UI
+            env:                               # Environment variables injected into this step
+              CI: false                        # Prevents build failure on warnings (common in CRA projects)
+              GENERATE_SOURCEMAP: false        # Skips sourcemap generation to reduce bundle size in prod
+
+          - task: ArchiveFiles@2               # Built-in task: zips files for deployment
+            inputs:                            # Parameters passed into the task
+              rootFolderOrFile: '$(workingDirectory)/build' # Zip the React /build output folder
+              includeRootFolder: false         # Don't nest inside a subfolder inside the zip
+              archiveType: 'zip'               # Create a .zip archive (required by Azure App Service)
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip' # Output zip path with unique build ID
+              replaceExistingArchive: true     # Overwrite zip if it already exists in staging
+            displayName: 'Zip Build Output'    # Label shown for this step in the UI
+
+          - task: PublishBuildArtifacts@1      # Built-in task: saves build output for later stages
+            inputs:                            # Parameters passed into the task
+              pathToPublish: '$(Build.ArtifactStagingDirectory)' # Folder containing the zip to publish
+              artifactName: 'drop'             # Name of the artifact bundle (referenced in Deploy stage)
+            displayName: 'Publish Artifacts'   # Label shown for this step in the UI
+
+  - stage: Deploy                             # Second stage — handles deployment after a successful build
+    displayName: 'Deploy to Dev'              # Human-readable label for this stage in the UI
+    dependsOn: Build                          # This stage only starts after the 'Build' stage completes
+    condition: succeeded()                    # Only run this stage if all previous stages passed
+    jobs:                                     # List of jobs to run within this stage
+      - deployment: DeployReactApp            # Special deployment job type (tracks environment history)
+        displayName: 'Deploy to App Service'  # Human-readable label for this job in the UI
+        environment: 'development'            # Links to an Azure DevOps Environment for tracking & approvals
+        strategy:                             # Defines how the deployment is executed
+          runOnce:                            # Simple strategy: run the deployment steps exactly once
+            deploy:                           # The deploy lifecycle hook — steps run during deployment
+              steps:                          # Ordered list of tasks to execute in this deployment
+
+                - task: AzureWebApp@1         # Built-in task: deploys a package to Azure App Service
+                  inputs:                     # Parameters passed into the task
+                    azureSubscription: 'sc-azure-myapp'   # Service connection name for Azure auth
+                    appType: webAppLinux                  # Target is a Linux-based App Service
+                    appName: $(appName)                   # App Service name (from variables above)
+                    package: '$(Pipeline.Workspace)/drop/$(Build.BuildId).zip' # Path to the published zip artifact
+                    startUpCommand: 'pm2 serve /home/site/wwwroot --no-daemon --spa' # Serve React SPA using pm2; --spa handles client-side routing
